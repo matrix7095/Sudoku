@@ -1,56 +1,53 @@
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.List;
-import java.util.concurrent.RecursiveTask;
+import java.util.*;
+import java.util.concurrent.RecursiveAction;
+import java.util.function.BiConsumer;
+import java.util.function.Predicate;
+import java.util.stream.*;
 
 
-public class Sudoku extends RecursiveTask<ArrayList<Matrix>> {
-    private String question = new String();
-    private ArrayList<Matrix> totalResult = new ArrayList<>();
+public class Sudoku extends RecursiveAction {
+    private Matrix question;
+    private static int maxResult;
+    private static HashSet<Matrix> resultList = new HashSet<>();
 
-    public Sudoku(String question) {
-        this.question = question;
+    public Sudoku(Matrix question) {
+
+        this.question = new Matrix(question);
     }
 
+
     @Override
-    protected ArrayList<Matrix> compute() {
-        Matrix matrix = new Matrix(this.question);
+    protected void compute() {
 
-        matrix = solve(matrix);
+        question = solve(question);
 
-        if (check(matrix)) {
-            totalResult.add(matrix);
-            return totalResult;
+        if (question.getStatus().equals(Matrix.Status.SUCCESSED) && resultList.size() < maxResult) {
+            resultList.add(question);
+        } else if (question.getStatus().equals(Matrix.Status.PROCESSING) && resultList.size() < maxResult) {
+            List<Sudoku> sudokuList =
+                    search(question).stream()
+                            .map(
+                                    a -> {
+                                        Sudoku subTask = new Sudoku(a);
+                                        subTask.fork();
+                                        return subTask;
+                                    }
+                            )
+                            .collect(Collectors.toList());
 
-        } else {
-            if (matrix.getStatus().equals("failed")) {
-                return totalResult;
-            } else {
-                List<RecursiveTask<ArrayList<Matrix>>> recursiveTaskList = new ArrayList<>();
-                ArrayList<Matrix> childMatrixList = search(matrix);
+            sudokuList.forEach(Sudoku::join);
 
-                for (Matrix childMatrix : childMatrixList) {
-                    Sudoku subTask = new Sudoku(childMatrix.getResultString());
-
-                    subTask.fork();
-                    recursiveTaskList.add(subTask);
-                }
-
-                for (RecursiveTask<ArrayList<Matrix>> subTask : recursiveTaskList) {
-                    totalResult.addAll(subTask.join());
-                }
-
-                return totalResult;
-
-
-            }
         }
 
 
     }
 
+    public static Matrix solve(Matrix matrix) {
+        check(matrix);
 
-    public Matrix solve(Matrix matrix) {
+        if (matrix.getStatus().equals(Matrix.Status.SUCCESSED) ||
+                matrix.getStatus().equals(Matrix.Status.FAILED))
+            return matrix;
 
         String before = "before";
         String after = "after";
@@ -63,264 +60,191 @@ public class Sudoku extends RecursiveTask<ArrayList<Matrix>> {
 
             after = matrix.getResultString();
         }
+
+        check(matrix);
+
         return matrix;
 
     }
 
-    public Matrix elimination(Matrix matrix) {
+    public static Matrix elimination(Matrix matrix) {
         matrix.update();
 
-        ArrayList<Point> unknownPoints = matrix.getNeedSolvePoints();
+        matrix.setStatus(Matrix.Status.PROCESSING);
 
-        for (Point corePoint : unknownPoints) {
-            ArrayList<Point> nearPoints = matrix.getNearPoints(corePoint);
+        matrix.getNeedSolvePoint()
+                .parallelStream()
+                .forEach(
+                        a -> {
+                            a.removeImpossibleResult(
+                                    Stream.concat(
+                                            matrix.getRowByPoint(a).stream(),
+                                            Stream.concat(
+                                                    matrix.getColByPoint(a).stream(),
+                                                    matrix.getBoxByPoint(a).stream()
+                                            )
+                                    ).filter(b -> !b.isNeedSolve())
+                                            .map(Point::getValue)
+                                            .distinct()
+                                            .map(Integer::parseInt)
+                                            .collect(Collectors.toList())
+                            );
 
-            for (Point nearPoint : nearPoints) {
-                corePoint.removeImpossibleResult(Integer.parseInt(nearPoint.getValue()));
-            }
+                            if (a.getPossibleResult().size() == 0) {
+                                matrix.setStatus(Matrix.Status.FAILED);
+                            }
 
-            if (corePoint.getPossibleResult().size() == 0) {
-                matrix.setStatus("failed");
-                return matrix;
-            }
-        }
+                        }
+                );
+
 
         return matrix;
 
     }
 
-    public Matrix update(Matrix matrix) {
-        ArrayList<Point> unknownPoints = matrix.getNeedSolvePoints();
+    public static Matrix update(Matrix matrix) {
+        if (matrix.getStatus().equals(Matrix.Status.FAILED))
+            return matrix;
 
-        for (Point corePoint : unknownPoints) {
-            Point[] row = matrix.getRowByPoint(corePoint);
-            Point[] col = matrix.getColByPoint(corePoint);
-            Point[] box = matrix.getBoxByPoint(corePoint);
+        BiConsumer<Point, List<Point>> choice = (point, points) ->
+                point.getPossibleResult()
+                        .parallelStream()
+                        .filter(a -> {
+                            long count = points
+                                    .stream()
+                                    .filter(b -> b.getPossibleResult().contains(a))
+                                    .count();
+                            return count == 1L;
+                        })
+                        .findFirst()
+                        .ifPresent(a -> point.setValue(a + ""));
 
-            Point[][] nearPoints = {row, col, box};
+        matrix.getNeedSolvePoint()
+                .parallelStream()
+                .forEach(a -> {
+                    choice.accept(a, matrix.getRowByPoint(a));
+                    choice.accept(a, matrix.getColByPoint(a));
+                    choice.accept(a, matrix.getBoxByPoint(a));
 
-            for (Point[] points : nearPoints) {
-                int num = choice(points, corePoint);
-                if (num > 0) {
-                    matrix.getPointByIndex(corePoint.getRow(), corePoint.getCol()).setValue(num + "");
+                });
 
-                }
-            }
-
-        }
 
         return matrix;
-    }
-
-    public int choice(Point[] points, Point corePoint) {
-        int count;
-        for (int i : corePoint.getPossibleResult()) {
-            count = 0;
-
-            for (Point testPoint : points) {
-                if (testPoint.getPossibleResult().contains(i)) {
-                    count++;
-                }
-            }
-            if (count == 1) {
-                return i;
-            }
-
-        }
-
-
-        return -1;
-    }
-
-    public ArrayList<Matrix> search(Matrix matrix) {
-
-        ArrayList<Matrix> returnList = new ArrayList<>();
-
-        ArrayList<Point> unknownPoints = matrix.getNeedSolvePoints();
-        unknownPoints.sort((a, b) -> (a.getPossibleResult().size() - b.getPossibleResult().size()));
-
-        Point parentPoint = unknownPoints.get(0);
-
-        for (int num : parentPoint.getPossibleResult()) {
-            Matrix childMatrix = new Matrix(matrix.getInputsString(), matrix.getResultString());
-
-            childMatrix.getPointByIndex(parentPoint.getRow(), parentPoint.getCol()).setValue(num + "");
-
-            returnList.add(childMatrix);
-        }
-
-        return returnList;
-
 
     }
 
-    public boolean check(Matrix matrix) {
-
-        boolean done = true;
-
-        if (matrix.getStatus().equals("failed"))
+    public static boolean check(Matrix matrix) {
+        if (matrix.getStatus().equals(Matrix.Status.FAILED))
             return false;
 
-        ArrayList<Point> unknownPoints = matrix.getNeedSolvePoints();
+        if (matrix.getNeedSolvePoint().size() == 0)
+            matrix.setStatus(Matrix.Status.SUCCESSED);
 
 
-        for (Point point : unknownPoints) {
-            done = false;
-            if (point.getPossibleResult().size() <= 0) {
-                matrix.setStatus("failed");
-            }
-        }
+        matrix.getNeedSolvePoint()
+                .parallelStream()
+                .filter(a -> a.getPossibleResult().size() == 0)
+                .findFirst()
+                .ifPresent(a -> matrix.setStatus(Matrix.Status.FAILED));
 
-        matrix.setStatus("done");
-        return done;
 
+        Predicate<List<Point>> checkValid = (list) -> {
+
+            List<String> testList = list.stream()
+                    .filter(a -> !a.isNeedSolve())
+                    .map(Point::getValue)
+                    .collect(Collectors.toList());
+
+            return testList.size() == new HashSet<>(testList).size();
+        };
+
+        IntStream.range(0, 9)
+                .filter(a ->
+                        (!checkValid.test(matrix.getRowByPoint(new Point(a, a, ".")))) ||
+                                (!checkValid.test(matrix.getColByPoint(new Point(a, a, ".")))) ||
+                                (!checkValid.test(matrix.getBoxByPoint(new Point(a / 3 * 3, a % 3 * 3, "."))))
+                )
+                .findFirst()
+                .ifPresent(a -> matrix.setStatus(Matrix.Status.FAILED));
+
+        return matrix.getStatus().equals(Matrix.Status.SUCCESSED);
+    }
+
+    public static List<Matrix> search(Matrix matrix) {
+
+        List<Matrix> matrixList =
+                matrix.getNeedSolvePoint()
+                        .stream()
+                        .sorted(Comparator.comparingInt(a -> a.getPossibleResult().size()))
+                        .limit(1)
+                        .flatMap(
+                                a -> a.getPossibleResult()
+                                        .stream()
+                                        .map(b -> {
+                                            Matrix childMatrix = new Matrix(matrix);
+                                            childMatrix.getPointByIndex(a.getRow(), a.getCol()).setValue(b + "");
+                                            return childMatrix;
+                                        })
+
+                        )
+                        .collect(Collectors.toList());
+
+        return matrixList;
 
     }
 
+    public static HashSet<Matrix> getResultList() {
+        return resultList;
+    }
 
+    public static void setMaxResult(int max) {
+        maxResult = max;
+        resultList = new HashSet<>();
+    }
 }
+
 
 class Matrix {
     private final int ROWS_NUM = 9;
     private final int COLS_NUM = 9;
+    private Status status = Status.NEW;
 
-    private Point[] inputs = new Point[81];
-    private Point[] result = new Point[81];
-    private String status = "new";
+    private List<Point> inputs = new ArrayList<>();
+    private List<Point> result = new ArrayList<>();
 
     public Matrix(String input) {
         this.inputs = strToPoint(input);
         this.result = strToPoint(input);
-
     }
 
-    public Matrix(String input, String result) {
+    public Matrix(Matrix matrix) {
+        this(matrix.getInputsString(), matrix.getResultString(), Status.NEW);
+    }
+
+    public Matrix(String input, String result, Status status) {
         this.inputs = strToPoint(input);
         this.result = strToPoint(result);
-        this.status = "done";
+        this.status = status;
     }
 
-    private Point[] strToPoint(String string) {
-        Point[] points = new Point[81];
-        String[] tokens = string.split("");
-        for (int i = 0; i < ROWS_NUM; i++) {
-            for (int j = 0; j < COLS_NUM; j++) {
-
-                Point point = new Point(i, j, tokens[i * ROWS_NUM + j]);
-                points[i * ROWS_NUM + j] = point;
-
-            }
-
-        }
-        return points;
-    }
-
-    private String pointToStr(Point[] points) {
-        StringBuffer stringBuffer = new StringBuffer();
-
-        for (int i = 0; i < ROWS_NUM; i++) {
-            for (int j = 0; j < COLS_NUM; j++) {
-
-                stringBuffer.append(points[i * ROWS_NUM + j].getValue());
-
-            }
-
-        }
-
-        return stringBuffer.toString();
-    }
-
-    public Point[] getInputs() {
-        return inputs;
-    }
-
-    public Point[] getResult() {
-        return this.result;
-
-    }
-
-    public String getInputsString() {
-        return pointToStr(this.inputs);
-    }
-
-    public String getResultString() {
-        return pointToStr(this.result);
-    }
-
-    public Point getPointByIndex(int row, int col) {
-        return result[row * ROWS_NUM + col];
-    }
-
-    public ArrayList<Point> getNeedSolvePoints() {
-        ArrayList<Point> points = new ArrayList<>(Arrays.asList(result));
-        points.removeIf(a -> (!a.isNeedSolve()));
-        return points;
-    }
-
-    public ArrayList<Point> getNearPoints(Point corePoint) {
-        ArrayList<Point> points = new ArrayList<>();
-        points.addAll(Arrays.asList(this.getRowByPoint(corePoint)));
-        points.addAll(Arrays.asList(this.getColByPoint(corePoint)));
-        points.addAll(Arrays.asList(this.getBoxByPoint(corePoint)));
-
-        points.removeIf(a -> a.isNeedSolve());
+    private static List<Point> strToPoint(String string) {
+        List<Point> points = IntStream.range(0, 81)
+                .mapToObj(n -> new Point(n / 9, n % 9, string.substring(n, n + 1)))
+                .collect(Collectors.toList());
 
         return points;
 
     }
 
-    public Point[] getRowByPoint(Point point) {
-        Point[] result = new Point[9];
-
-        int row = point.getRow();
-
-        for (int i = 0; i < COLS_NUM; i++) {
-            result[i] = getPointByIndex(row, i);
-        }
-
-        return result;
+    private static String pointToStr(List<Point> points) {
+        return points.stream().map(Point::getValue).collect(Collectors.joining());
 
     }
-
-    public Point[] getColByPoint(Point point) {
-        Point[] result = new Point[9];
-
-        int col = point.getCol();
-
-        for (int i = 0; i < ROWS_NUM; i++) {
-            result[i] = getPointByIndex(i, col);
-        }
-
-        return result;
-
-    }
-
-    public Point[] getBoxByPoint(Point point) {
-        Point[] result = new Point[9];
-
-        int row = Math.floorDiv(point.getRow(), 3);
-        int col = Math.floorDiv(point.getCol(), 3);
-
-        for (int i = 0; i < 3; i++) {
-            for (int j = 0; j < 3; j++) {
-                result[i * 3 + j] = getPointByIndex(row * 3 + i, col * 3 + j);
-            }
-        }
-
-
-        return result;
-
-    }
-
-    public String getStatus() {
-        return status;
-    }
-
 
     public static String show(String string) {
         StringBuffer stringBuffer = new StringBuffer();
 
-        String[] tokens =string.split("");
+        String[] tokens = string.split("");
 
         for (int i = 0; i < 9; i++) {
             stringBuffer.append("\n");
@@ -336,52 +260,113 @@ class Matrix {
         return stringBuffer.toString();
     }
 
-    public void update() {
-        for (Point point :
-                this.result) {
-            point.update();
-        }
+    public List<Point> getResult() {
+        return result;
     }
 
-    public void setStatus(String status) {
+    public String getInputsString() {
+        return pointToStr(this.inputs);
+    }
+
+    public String getResultString() {
+        return pointToStr(this.result);
+    }
+
+    public Status getStatus() {
+        return status;
+    }
+
+    public Point getPointByIndex(int row, int col) {
+        return result.get(row * ROWS_NUM + col);
+    }
+
+    public List<Point> getNeedSolvePoint() {
+        return this.result.parallelStream().filter(Point::isNeedSolve).collect(Collectors.toList());
+    }
+
+    public List<Point> getRowByPoint(Point corePoint) {
+        List<Point> points = IntStream.range(0, 9)
+                .mapToObj(n -> getPointByIndex(corePoint.getRow(), n))
+                .collect(Collectors.toList());
+
+        return points;
+    }
+
+    public List<Point> getColByPoint(Point corePoint) {
+        List<Point> points = IntStream.range(0, 9)
+                .mapToObj(n -> getPointByIndex(n, corePoint.getCol()))
+                .collect(Collectors.toList());
+
+        return points;
+    }
+
+    public List<Point> getBoxByPoint(Point corePoint) {
+        List<Point> points = IntStream.range(0, 9)
+                .mapToObj(n -> getPointByIndex((corePoint.getRow() / 3) * 3 + n / 3, (corePoint.getCol() / 3) * 3 + n % 3))
+                .collect(Collectors.toList());
+
+        return points;
+
+    }
+
+    public void update() {
+        this.result.parallelStream().forEach(Point::update);
+    }
+
+    public void setStatus(Status status) {
         this.status = status;
     }
 
-    public void setResult(String string) {
-        this.status = "done";
-        this.result = strToPoint(string);
-    }
+    public enum Status {
+        NEW, PROCESSING, SUCCESSED, FAILED,
 
+    }
 
     @Override
-    public String toString() {
-        StringBuffer stringBuffer = new StringBuffer();
+    public boolean equals(Object obj) {
 
-        for (int i = 0; i < ROWS_NUM; i++) {
-            for (int j = 0; j < COLS_NUM; j++) {
-
-                stringBuffer.append(inputs[i * ROWS_NUM + j].getValue());
-
-            }
-
+        try {
+            Matrix otherMatrix = (Matrix) obj;
+            return this.getResultString().equals(otherMatrix.getResultString());
+        } catch (Exception e) {
+            e.printStackTrace();
         }
 
-        return stringBuffer.toString();
+        return super.equals(obj);
     }
 }
+
 
 class Point {
     private int row;
     private int col;
     private boolean needSolve;
     private String value;
-    private ArrayList<Integer> possibleResult = new ArrayList();
+    private List<Integer> possibleResult = new ArrayList<>();
 
     public Point(int row, int col, String value) {
         this.row = row;
         this.col = col;
         this.value = value;
-        update();
+        this.update();
+    }
+
+    public Point(Point point) {
+        this.row = point.getRow();
+        this.col = point.getCol();
+        this.value = point.getValue();
+        this.update();
+    }
+
+    public void update() {
+
+        if (value.equals(".")) {
+            this.needSolve = true;
+            this.possibleResult = new ArrayList<>(Arrays.asList(1, 2, 3, 4, 5, 6, 7, 8, 9));
+        } else {
+            this.needSolve = false;
+            this.possibleResult = new ArrayList<>(Arrays.asList(Integer.parseInt(this.value)));
+        }
 
     }
 
@@ -401,47 +386,16 @@ class Point {
         return needSolve;
     }
 
-    public void setValue(String value) {
-        this.value = value;
-        update();
-
-
-    }
-
-    public void update() {
-        this.possibleResult.clear();
-
-        if (value.equals(".")) {
-            this.needSolve = true;
-
-            for (int i = 1; i < 10; i++) {
-                possibleResult.add(i);
-
-            }
-        } else {
-            this.needSolve = false;
-            possibleResult.add(Integer.parseInt(value));
-        }
-    }
-
-    public void removeImpossibleResult(Integer value) {
-        possibleResult.remove(value);
-
-    }
-
-    public ArrayList<Integer> getPossibleResult() {
+    public List<Integer> getPossibleResult() {
         return possibleResult;
     }
 
-    @Override
-    public boolean equals(Object obj) {
-        try {
-            Point other = (Point) obj;
-            return this.col == other.getCol() && this.row == other.getRow();
-        } catch (Exception e) {
+    public void setValue(String value) {
+        this.value = value;
+        this.update();
+    }
 
-        }
-
-        return super.equals(obj);
+    public void removeImpossibleResult(List<Integer> list) {
+        list.forEach(a -> this.possibleResult.remove(a));
     }
 }
